@@ -1,0 +1,10 @@
+{
+  "name": "Moorish Science Temple of America",
+  "short_name": "MSTA Baltimore",
+  "description": "Baltimore Temple institutional site for history, teachings, service, events, and the Moorish Digital Archive.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#081726",
+  "theme_color": "#081726"
+}
