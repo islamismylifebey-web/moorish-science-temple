@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { routes, site } from "./content";
 import "./styles.css";
+import "./heritage.css";
 
 export const metadata: Metadata = {
   metadataBase: new URL(site.url),
