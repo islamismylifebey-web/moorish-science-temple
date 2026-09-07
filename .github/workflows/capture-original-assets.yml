@@ -23,15 +23,17 @@ jobs:
           python - <<'PY'
           from pathlib import Path
           from urllib.parse import urljoin, urlparse
-          import io
+          import io, re, hashlib
           import requests
           from bs4 import BeautifulSoup
           from PIL import Image
 
           origin = 'https://moorishsciencetemple.org/'
           out_brand = Path('public/brand')
+          out_candidates = out_brand / 'candidates'
           out_photos = Path('public/heritage')
           out_brand.mkdir(parents=True, exist_ok=True)
+          out_candidates.mkdir(parents=True, exist_ok=True)
           out_photos.mkdir(parents=True, exist_ok=True)
 
           session = requests.Session()
@@ -39,57 +41,58 @@ jobs:
           html = session.get(origin, timeout=30).text
           soup = BeautifulSoup(html, 'html.parser')
 
-          icon_urls = []
-          for link in soup.find_all('link'):
-              rel = ' '.join(link.get('rel', [])).lower()
-              href = link.get('href')
-              if href and 'icon' in rel:
-                  icon_urls.append(urljoin(origin, href))
+          discovered = set()
+          def add_url(raw):
+              if not raw or raw.startswith(('data:', 'blob:', '#', 'javascript:')):
+                  return
+              u = urljoin(origin, raw.strip(' "\''))
+              if u.startswith('http'):
+                  discovered.add(u)
 
-          logo_urls = []
+          # DOM image sources and srcsets.
           for img in soup.find_all('img'):
-              src = img.get('src') or img.get('data-src')
-              if not src:
-                  continue
-              hay = ' '.join([
-                  img.get('alt',''),
-                  img.get('class') and ' '.join(img.get('class')) or '',
-                  img.get('id',''),
-                  src,
-              ]).lower()
-              if any(k in hay for k in ('logo','site-logo','circle seven','circle-7','circle7')):
-                  logo_urls.append(urljoin(origin, src))
+              for key in ('src','data-src','data-lazy-src'):
+                  add_url(img.get(key))
+              for key in ('srcset','data-srcset'):
+                  srcset = img.get(key) or ''
+                  for part in srcset.split(','):
+                      add_url(part.strip().split(' ')[0] if part.strip() else '')
 
-          print('ICON CANDIDATES:')
-          for u in icon_urls: print(u)
-          print('LOGO CANDIDATES:')
-          for u in logo_urls: print(u)
+          # Icons and stylesheets.
+          stylesheets = []
+          for link in soup.find_all('link'):
+              href = link.get('href')
+              rel = ' '.join(link.get('rel', [])).lower()
+              if href and 'stylesheet' in rel:
+                  stylesheets.append(urljoin(origin, href))
+              if href and 'icon' in rel:
+                  add_url(href)
 
-          chosen = logo_urls[0] if logo_urls else (icon_urls[-1] if icon_urls else None)
-          if not chosen:
-              raise SystemExit('Could not discover the original site icon/logo')
+          # Inline style URLs.
+          for tag in soup.find_all(style=True):
+              for raw in re.findall(r'url\(([^)]+)\)', tag.get('style','')):
+                  add_url(raw)
+          for style in soup.find_all('style'):
+              for raw in re.findall(r'url\(([^)]+)\)', style.get_text(' ', strip=False)):
+                  add_url(raw)
 
-          def save_png(url: str, path: Path, max_size=None):
-              r = session.get(url, timeout=45)
+          # Linked stylesheet image URLs.
+          for css_url in stylesheets:
+              try:
+                  css = session.get(css_url, timeout=20).text
+                  for raw in re.findall(r'url\(([^)]+)\)', css):
+                      raw = raw.strip(' "\'')
+                      if raw and not raw.startswith('data:'):
+                          discovered.add(urljoin(css_url, raw))
+              except Exception as exc:
+                  print('CSS SKIP', css_url, exc)
+
+          def open_remote(url):
+              r = session.get(url, timeout=40)
               r.raise_for_status()
-              im = Image.open(io.BytesIO(r.content)).convert('RGBA')
-              if max_size:
-                  im.thumbnail(max_size, Image.Resampling.LANCZOS)
-              im.save(path, 'PNG', optimize=True)
-              print(f'SAVED {path} <- {url} ({im.width}x{im.height})')
+              return Image.open(io.BytesIO(r.content))
 
-          def save_webp(url: str, path: Path, max_size=(1800, 1400)):
-              r = session.get(url, timeout=45)
-              r.raise_for_status()
-              im = Image.open(io.BytesIO(r.content)).convert('RGB')
-              im.thumbnail(max_size, Image.Resampling.LANCZOS)
-              im.save(path, 'WEBP', quality=84, method=6)
-              print(f'SAVED {path} <- {url} ({im.width}x{im.height})')
-
-          save_png(chosen, out_brand / 'circle-seven-original.png', (1024, 1024))
-          save_png(chosen, Path('app/icon.png'), (512, 512))
-          save_png(chosen, Path('app/apple-icon.png'), (512, 512))
-
+          # Save real Temple photography from the original site.
           photos = {
               'community-hero.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T143815.529.png',
               'prophet-quote.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Group-128-3.png',
@@ -105,12 +108,66 @@ jobs:
               'gallery-07.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T120548.479.png',
           }
           for name, url in photos.items():
-              save_webp(url, out_photos / name)
+              try:
+                  im = open_remote(url).convert('RGB')
+                  im.thumbnail((1800, 1400), Image.Resampling.LANCZOS)
+                  im.save(out_photos / name, 'WEBP', quality=84, method=6)
+                  print('PHOTO', name, url, im.size)
+              except Exception as exc:
+                  print('PHOTO SKIP', name, url, exc)
+
+          # Find likely Circle Seven / logo candidates by shape, transparency, metadata, and URL text.
+          ranked = []
+          seen_hash = set()
+          for url in sorted(discovered):
+              if not re.search(r'\.(png|jpe?g|webp|gif|svg)(\?|$)', url, re.I):
+                  continue
+              try:
+                  r = session.get(url, timeout=25)
+                  if r.status_code != 200 or len(r.content) < 500:
+                      continue
+                  digest = hashlib.sha1(r.content).hexdigest()
+                  if digest in seen_hash:
+                      continue
+                  seen_hash.add(digest)
+                  im = Image.open(io.BytesIO(r.content))
+                  w,h = im.size
+                  if min(w,h) < 48 or max(w,h) > 4000:
+                      continue
+                  ratio = w / h
+                  text = url.lower()
+                  score = 0
+                  if 0.72 <= ratio <= 1.38: score += 5
+                  if any(k in text for k in ('logo','circle','seven','moorish','cropped','icon')): score += 9
+                  if im.mode in ('RGBA','LA') or 'transparency' in im.info: score += 4
+                  if max(w,h) <= 1000: score += 2
+                  if score < 5:
+                      continue
+                  ranked.append((score, url, r.content, w, h))
+              except Exception:
+                  continue
+
+          ranked.sort(reverse=True, key=lambda x: x[0])
+          manifest = []
+          for i,(score,url,content,w,h) in enumerate(ranked[:12], start=1):
+              try:
+                  im = Image.open(io.BytesIO(content)).convert('RGBA')
+                  im.thumbnail((1000,1000), Image.Resampling.LANCZOS)
+                  path = out_candidates / f'candidate-{i:02d}.png'
+                  im.save(path, 'PNG', optimize=True)
+                  manifest.append(f'{i:02d}\tscore={score}\t{w}x{h}\t{url}')
+                  print('BRAND CANDIDATE', manifest[-1])
+              except Exception as exc:
+                  print('BRAND SKIP', url, exc)
+
+          (out_brand / 'candidate-manifest.txt').write_text('\n'.join(manifest) + '\n', encoding='utf-8')
+          if not manifest:
+              raise SystemExit('No viable original branding candidates discovered')
           PY
       - name: Commit captured original assets
         run: |
           git config user.name "Temple Site Asset Capture"
           git config user.email "actions@users.noreply.github.com"
-          git add app/icon.png app/apple-icon.png public/brand public/heritage
-          git commit -m "assets: preserve original Temple identity and photography" || exit 0
+          git add public/brand public/heritage
+          git commit -m "assets: preserve original Temple photography and branding candidates" || exit 0
           git push
