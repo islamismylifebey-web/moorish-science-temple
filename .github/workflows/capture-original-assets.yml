@@ -1,0 +1,116 @@
+name: Capture Original Temple Assets
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/capture-original-assets.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet pillow beautifulsoup4 requests
+      - name: Capture original Circle Seven and Temple photography
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from urllib.parse import urljoin, urlparse
+          import io
+          import requests
+          from bs4 import BeautifulSoup
+          from PIL import Image
+
+          origin = 'https://moorishsciencetemple.org/'
+          out_brand = Path('public/brand')
+          out_photos = Path('public/heritage')
+          out_brand.mkdir(parents=True, exist_ok=True)
+          out_photos.mkdir(parents=True, exist_ok=True)
+
+          session = requests.Session()
+          session.headers['User-Agent'] = 'Mozilla/5.0 TempleArchiveCapture/1.0'
+          html = session.get(origin, timeout=30).text
+          soup = BeautifulSoup(html, 'html.parser')
+
+          icon_urls = []
+          for link in soup.find_all('link'):
+              rel = ' '.join(link.get('rel', [])).lower()
+              href = link.get('href')
+              if href and 'icon' in rel:
+                  icon_urls.append(urljoin(origin, href))
+
+          logo_urls = []
+          for img in soup.find_all('img'):
+              src = img.get('src') or img.get('data-src')
+              if not src:
+                  continue
+              hay = ' '.join([
+                  img.get('alt',''),
+                  img.get('class') and ' '.join(img.get('class')) or '',
+                  img.get('id',''),
+                  src,
+              ]).lower()
+              if any(k in hay for k in ('logo','site-logo','circle seven','circle-7','circle7')):
+                  logo_urls.append(urljoin(origin, src))
+
+          print('ICON CANDIDATES:')
+          for u in icon_urls: print(u)
+          print('LOGO CANDIDATES:')
+          for u in logo_urls: print(u)
+
+          chosen = logo_urls[0] if logo_urls else (icon_urls[-1] if icon_urls else None)
+          if not chosen:
+              raise SystemExit('Could not discover the original site icon/logo')
+
+          def save_png(url: str, path: Path, max_size=None):
+              r = session.get(url, timeout=45)
+              r.raise_for_status()
+              im = Image.open(io.BytesIO(r.content)).convert('RGBA')
+              if max_size:
+                  im.thumbnail(max_size, Image.Resampling.LANCZOS)
+              im.save(path, 'PNG', optimize=True)
+              print(f'SAVED {path} <- {url} ({im.width}x{im.height})')
+
+          def save_webp(url: str, path: Path, max_size=(1800, 1400)):
+              r = session.get(url, timeout=45)
+              r.raise_for_status()
+              im = Image.open(io.BytesIO(r.content)).convert('RGB')
+              im.thumbnail(max_size, Image.Resampling.LANCZOS)
+              im.save(path, 'WEBP', quality=84, method=6)
+              print(f'SAVED {path} <- {url} ({im.width}x{im.height})')
+
+          save_png(chosen, out_brand / 'circle-seven-original.png', (1024, 1024))
+          save_png(chosen, Path('app/icon.png'), (512, 512))
+          save_png(chosen, Path('app/apple-icon.png'), (512, 512))
+
+          photos = {
+              'community-hero.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T143815.529.png',
+              'prophet-quote.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Group-128-3.png',
+              'temple-antique.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2025/04/Moorish-Science-Temple-Antique-Photo.webp',
+              'noble-drew-ali.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2025/04/Noble-Drew-Ali-Image.webp',
+              'gallery-00.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Group-129-2.png',
+              'gallery-01.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T120317.915.png',
+              'gallery-02.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T120355.445.png',
+              'gallery-03.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T120425.666.png',
+              'gallery-04.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T120446.340.png',
+              'gallery-05.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T120508.760.png',
+              'gallery-06.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T120529.427.png',
+              'gallery-07.webp': 'https://moorishsciencetemple.org/wp-content/uploads/2024/05/Mask-group-2024-05-17T120548.479.png',
+          }
+          for name, url in photos.items():
+              save_webp(url, out_photos / name)
+          PY
+      - name: Commit captured original assets
+        run: |
+          git config user.name "Temple Site Asset Capture"
+          git config user.email "actions@users.noreply.github.com"
+          git add app/icon.png app/apple-icon.png public/brand public/heritage
+          git commit -m "assets: preserve original Temple identity and photography" || exit 0
+          git push
