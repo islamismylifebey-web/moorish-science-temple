@@ -24,7 +24,7 @@ test("original Temple photography is integrated into the interface", async () =>
 });
 
 test("heritage treatment remains accessible and motion-safe", async () => {
-  const css = await read("app/styles.css");
+  const css = `${await read("app/styles.css")}\n${await read("app/heritage.css")}`;
   const home = await read("app/page.tsx");
   assert.match(css, /heritage-frame/);
   assert.match(css, /seal-watermark/);
